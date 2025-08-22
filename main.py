@@ -22,15 +22,15 @@ if not BOT_TOKEN:
 OWNER_NAME = os.getenv("OWNER_NAME", "Achal")
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "your_username_here")
 
-# aiogram Bot (compatible with aiogram 3.22)
+# Use DefaultBotProperties to set parse_mode for aiogram v3.22+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Flask app for webhook endpoint (gunicorn will serve this)
+# Flask app for webhook endpoint (served by gunicorn)
 app = Flask(__name__)
 
 START_TIME = time.time()
-user_state = {}  # in-memory session
+user_state = {}  # in-memory session state
 
 # ---------- helpers ----------
 def ensure_user(uid: int):
@@ -44,7 +44,6 @@ def format_uptime(seconds: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 def now_ist_str() -> str:
-    from datetime import datetime, timedelta
     ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     return ist.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -284,7 +283,6 @@ def _start_background_loop():
     _async_loop = asyncio.new_event_loop()
     def _run_loop():
         asyncio.set_event_loop(_async_loop)
-        # schedule set_commands once on this loop
         try:
             _async_loop.create_task(set_commands())
         except Exception:
@@ -295,6 +293,45 @@ def _start_background_loop():
 
 # start background loop on import (gunicorn import will trigger this)
 _start_background_loop()
+
+# ========== Temporary HTTP endpoint to set webhook (one-time) ==========
+# Security: set WEBHOOK_SECRET in Render environment to a random value, e.g. "m3@Secret"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or (f"https://{RENDER_HOSTNAME}/webhook/{BOT_TOKEN}" if RENDER_HOSTNAME else None)
+
+@app.route("/set_webhook_temp", methods=["GET"])
+def set_webhook_temp():
+    """
+    Call this once from your browser:
+    https://<your-service>.onrender.com/set_webhook_temp?key=<WEBHOOK_SECRET>
+    """
+
+    # security check
+    key = request.args.get("key", "")
+    if not WEBHOOK_SECRET or key != WEBHOOK_SECRET:
+        return "Forbidden (missing/invalid key). Set WEBHOOK_SECRET in environment.", 403
+
+    if not WEBHOOK_URL:
+        return "WEBHOOK_URL not configured (set WEBHOOK_URL or ensure RENDER_EXTERNAL_HOSTNAME env exists).", 500
+
+    async def _do():
+        tmp = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+        try:
+            await tmp.delete_webhook(drop_pending_updates=True)
+            await tmp.set_webhook(WEBHOOK_URL)
+            return f"✅ Webhook set: {WEBHOOK_URL}"
+        finally:
+            try:
+                await tmp.session.close()
+            except Exception:
+                pass
+
+    try:
+        result = asyncio.run(_do())
+        return result
+    except Exception as e:
+        return f"Error setting webhook: {e}", 500
 
 # WEBHOOK handling (incoming POST)
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
@@ -309,7 +346,7 @@ def telegram_webhook():
         else:
             future = asyncio.run_coroutine_threadsafe(dp.feed_update(bot, update), _async_loop)
             try:
-                # wait for short time for errors (non-blocking)
+                # wait a short time for result to surface errors (non-blocking to Flask)
                 future.result(timeout=10)
             except Exception as e:
                 print("Error while processing update:", e)
@@ -323,6 +360,5 @@ def index():
 
 # __main__ only for local debug (not used with gunicorn)
 if __name__ == "__main__":
-    # for local dev: set commands and run flask dev server
     asyncio.run(set_commands())
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
