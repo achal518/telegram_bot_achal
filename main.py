@@ -1,88 +1,76 @@
-
-from flask import Flask
-from pyrogram import Client, filters
 import os
-import random
-import datetime
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from flask import Flask
 
-# Flask app for keep-alive
+# logging setup
+logging.basicConfig(level=logging.INFO)
+
+# bot token from environment variable (safe way)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("No BOT_TOKEN provided. Please set it in Render secrets.")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
+
+# ====== BOT HANDLERS ======
+
+# start command
+@dp.message_handler(commands=["start"])
+async def start_cmd(message: types.Message):
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton("👋 Hello", callback_data="hello"),
+        types.InlineKeyboardButton("📚 Help", callback_data="help"),
+        types.InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+        types.InlineKeyboardButton("🎲 Random", callback_data="random"),
+        types.InlineKeyboardButton("📢 Updates", callback_data="updates"),
+        types.InlineKeyboardButton("📝 Notes", callback_data="notes"),
+        types.InlineKeyboardButton("💡 Tips", callback_data="tips"),
+        types.InlineKeyboardButton("🔗 Links", callback_data="links"),
+        types.InlineKeyboardButton("❓ About", callback_data="about"),
+        types.InlineKeyboardButton("🚀 Extra", callback_data="extra"),
+    )
+    await message.answer("👋 Welcome! Choose an option below:", reply_markup=keyboard)
+
+# handle button callbacks
+@dp.callback_query_handler(lambda c: True)
+async def process_callback(callback_query: types.CallbackQuery):
+    data = callback_query.data
+    responses = {
+        "hello": "Hello! 👋",
+        "help": "Here’s some help 📚",
+        "settings": "Settings panel ⚙️",
+        "random": "Random number 🎲: " + str(os.urandom(1)[0]),
+        "updates": "Latest updates 📢",
+        "notes": "Write your notes 📝",
+        "tips": "Here are some tips 💡",
+        "links": "Some useful links 🔗",
+        "about": "This is a demo bot ❓",
+        "extra": "Extra feature 🚀",
+    }
+    response = responses.get(data, "Unknown option ❌")
+    await bot.answer_callback_query(callback_query.id)
+    await bot.send_message(callback_query.from_user.id, response)
+
+# ====== FLASK APP for Render ======
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running fine!"
+    return "Bot is running ✅"
 
-# Pyrogram bot
-API_ID = int(os.getenv("API_ID"))       # Secret me dalna
-API_HASH = os.getenv("API_HASH")        # Secret me dalna
-BOT_TOKEN = os.getenv("BOT_TOKEN")      # Secret me dalna
-
-bot = Client(
-    "my_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
-
-# Jokes & Quotes
-jokes = [
-    "😂 Why did the computer go to the doctor? Because it caught a virus!",
-    "🤣 I asked my laptop for a joke… it said '404 Joke Not Found!'",
-    "😜 Why was the math book sad? Because it had too many problems."
-]
-
-quotes = [
-    "🌟 Believe in yourself!",
-    "🚀 Dreams don’t work unless you do.",
-    "🔥 Stay positive, work hard, make it happen."
-]
-
-# /start command with inline keyboard
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-@bot.on_message(filters.command("start"))
-async def start(client, message):
-    keyboard = [
-        [InlineKeyboardButton("📌 About Bot", callback_data="about")],
-        [InlineKeyboardButton("👤 My Profile", callback_data="profile")],
-        [InlineKeyboardButton("⏰ Time & Date", callback_data="time")],
-        [InlineKeyboardButton("😂 Random Joke", callback_data="joke")],
-        [InlineKeyboardButton("💡 Quote", callback_data="quote")],
-        [InlineKeyboardButton("❌ Exit", callback_data="exit")]
-    ]
-    await message.reply("Welcome! Choose an option 👇", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# Button handler
-@bot.on_callback_query()
-async def callback(client, query):
-    if query.data == "about":
-        text = "🤖 This is a simple Pyrogram bot with inline buttons."
-    elif query.data == "profile":
-        user = query.from_user
-        text = f"👤 Profile:\nName: {user.first_name}\nUsername: @{user.username}\nID: {user.id}"
-    elif query.data == "time":
-        text = f"⏰ Current Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    elif query.data == "joke":
-        text = random.choice(jokes)
-    elif query.data == "quote":
-        text = random.choice(quotes)
-    elif query.data == "exit":
-        text = "❌ Bot stopped. Type /start to begin again."
-    else:
-        text = "⚠️ Unknown option!"
-    
-    await query.message.edit_text(text)
-
-# Run Flask + Bot
+# ====== START BOT ======
 if __name__ == "__main__":
     import threading
 
-    # Run Flask server in background
+    # run flask server in separate thread
     def run_flask():
         app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
-    t = threading.Thread(target=run_flask)
-    t.start()
+    threading.Thread(target=run_flask).start()
 
-    # Run Telegram bot
-    bot.run()
+    # run aiogram bot
+    executor.start_polling(dp, skip_updates=True)
