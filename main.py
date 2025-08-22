@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 )
@@ -25,8 +26,8 @@ if not BOT_TOKEN:
 OWNER_NAME = os.getenv("OWNER_NAME", "Achal")
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "your_username_here")  # without @
 
-# Bot & Dispatcher (HTML parse for easy styling)
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# Bot & Dispatcher (use DefaultBotProperties for parse_mode to be compatible with aiogram v3.22)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 # Keep-alive Flask for Render
@@ -246,9 +247,11 @@ async def cb_design_pick(cb: CallbackQuery):
         "design_mono": "mono",
         "design_fancy": "fancy",
     }
+    # cb.data is the callback_data string (like "design_bold")
+    sel = mapping.get(cb.data, "bold")
     user_state[uid]["mode"] = "design"
-    user_state[uid]["design_style"] = mapping[cb.data]
-    pretty = {"bold": "🅱️ Bold", "italic": "𝑰 Italic", "mono": "</> Mono", "fancy": "✨ Fancy"}[mapping[cb.data]]
+    user_state[uid]["design_style"] = sel
+    pretty = {"bold": "🅱️ Bold", "italic": "𝑰 Italic", "mono": "</> Mono", "fancy": "✨ Fancy"}[sel]
     await cb.message.answer(f"{pretty} selected.\nAb apna text bhejo. (/cancel to stop)")
     await cb.answer()
 
@@ -343,7 +346,11 @@ async def set_commands():
         BotCommand(command="menu", description="Show main menu"),
         BotCommand(command="cancel", description="Cancel current mode"),
     ]
-    await bot.set_my_commands(cmds)
+    try:
+        await bot.set_my_commands(cmds)
+    except Exception:
+        # ignore if fails (e.g. network)
+        pass
 
 # =========================
 # RUN APP
@@ -355,7 +362,7 @@ async def main():
 if __name__ == "__main__":
     # Flask in separate thread (Render health)
     port = int(os.environ.get("PORT", "10000"))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port)).start()
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
 
-    # Run bot (aiogram v3; no executor import needed)
+    # Run bot (aiogram v3; use asyncio)
     asyncio.run(main())
