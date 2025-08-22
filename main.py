@@ -3,36 +3,45 @@ import asyncio
 import os
 import random
 import string
-import threading
 import time
 from datetime import datetime, timedelta
-from flask import Flask, request
+
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, Update
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 )
 from aiogram.filters import Command
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # ========== CONFIG ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing. Set it in Environment.")
 
+# Yeh Render.com environment variable se aayega. Example: https://your-app-name.onrender.com
+BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL")
+
 OWNER_NAME = os.getenv("OWNER_NAME", "Achal")
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "your_username_here")
 
-# Use DefaultBotProperties to set parse_mode for aiogram v3.22+
+# Webhook settings
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_SECRET = "my_super_secret_string_12345" # aap isko badal sakte hain
+WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+
+# Web server settings
+WEB_SERVER_HOST = "0.0.0.0"
+WEB_SERVER_PORT = int(os.getenv("PORT", 8080)) # Render PORT variable use karega
+
+# Bot and Dispatcher
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
-
-# Flask app for webhook endpoint (served by gunicorn)
-app = Flask(__name__)
-
 START_TIME = time.time()
 user_state = {}  # in-memory session state
 
-# ---------- helpers ----------
+# ---------- helpers (SAME AS BEFORE) ----------
 def ensure_user(uid: int):
     if uid not in user_state:
         user_state[uid] = {"echo": False, "mode": None, "design_style": None, "guess_target": None}
@@ -83,7 +92,10 @@ def design_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_menu")]
     ])
 
-# ========== BOT HANDLERS ==========
+# ========== BOT HANDLERS (SAME AS BEFORE) ==========
+# Yahan par aapke saare purane bot handlers (cmd_start, cb_greet, etc.) aayenge.
+# Maine neeche sab paste kar diya hai, koi change nahi karna hai.
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     ensure_user(message.from_user.id)
@@ -260,105 +272,45 @@ async def all_text(message: Message):
 
     await message.answer("🙂 Use /menu or press buttons.", reply_markup=main_menu())
 
-# set bot commands
-async def set_commands():
+# ========== APP LIFECYCLE ==========
+async def on_startup(bot: Bot) -> None:
+    # Set bot commands
     cmds = [BotCommand(command="start", description="Open menu"),
             BotCommand(command="help", description="How to use"),
             BotCommand(command="menu", description="Show menu"),
             BotCommand(command="cancel", description="Cancel mode")]
-    try:
-        await bot.set_my_commands(cmds)
-    except Exception:
-        pass
+    await bot.set_my_commands(cmds)
 
-# -----------------------
-# Background asyncio loop (one per worker) — used for feeding updates
-# -----------------------
-_async_loop = None
+    # Set webhook
+    await bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET)
+    print(f"✅ Webhook set to: {WEBHOOK_URL}")
 
-def _start_background_loop():
-    global _async_loop
-    if _async_loop is not None:
-        return
-    _async_loop = asyncio.new_event_loop()
-    def _run_loop():
-        asyncio.set_event_loop(_async_loop)
-        try:
-            _async_loop.create_task(set_commands())
-        except Exception:
-            pass
-        _async_loop.run_forever()
-    t = threading.Thread(target=_run_loop, daemon=True)
-    t.start()
 
-# start background loop on import (gunicorn import will trigger this)
-_start_background_loop()
+async def on_shutdown(bot: Bot) -> None:
+    # Delete webhook
+    await bot.delete_webhook()
+    print("✅ Webhook deleted.")
 
-# ========== Temporary HTTP endpoint to set webhook (one-time) ==========
-# Security: set WEBHOOK_SECRET in Render environment to a random value, e.g. "m3@Secret"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") or (f"https://{RENDER_HOSTNAME}/webhook/{BOT_TOKEN}" if RENDER_HOSTNAME else None)
 
-@app.route("/set_webhook_temp", methods=["GET"])
-def set_webhook_temp():
-    """
-    Call this once from your browser:
-    https://<your-service>.onrender.com/set_webhook_temp?key=<WEBHOOK_SECRET>
-    """
+def main():
+    # Register lifecycle events
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
 
-    # security check
-    key = request.args.get("key", "")
-    if not WEBHOOK_SECRET or key != WEBHOOK_SECRET:
-        return "Forbidden (missing/invalid key). Set WEBHOOK_SECRET in environment.", 403
+    # Create aiohttp app and register handlers
+    app = web.Application()
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    
+    # Mount dispatcher on app and start web server
+    setup_application(app, dp, bot=bot)
+    web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
 
-    if not WEBHOOK_URL:
-        return "WEBHOOK_URL not configured (set WEBHOOK_URL or ensure RENDER_EXTERNAL_HOSTNAME env exists).", 500
 
-    async def _do():
-        tmp = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-        try:
-            await tmp.delete_webhook(drop_pending_updates=True)
-            await tmp.set_webhook(WEBHOOK_URL)
-            return f"✅ Webhook set: {WEBHOOK_URL}"
-        finally:
-            try:
-                await tmp.session.close()
-            except Exception:
-                pass
-
-    try:
-        result = asyncio.run(_do())
-        return result
-    except Exception as e:
-        return f"Error setting webhook: {e}", 500
-
-# WEBHOOK handling (incoming POST)
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-@app.route(WEBHOOK_PATH, methods=["POST"])
-def telegram_webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.model_validate(data)
-        # schedule feeding update into dispatcher on background loop
-        if _async_loop is None:
-            print("No async loop available to handle update")
-        else:
-            future = asyncio.run_coroutine_threadsafe(dp.feed_update(bot, update), _async_loop)
-            try:
-                # wait a short time for result to surface errors (non-blocking to Flask)
-                future.result(timeout=10)
-            except Exception as e:
-                print("Error while processing update:", e)
-    except Exception as e:
-        print("Webhook processing error:", e)
-    return "ok"
-
-@app.route("/")
-def index():
-    return "🤖 Bot (webhook) up"
-
-# __main__ only for local debug (not used with gunicorn)
 if __name__ == "__main__":
-    asyncio.run(set_commands())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    main()
+
